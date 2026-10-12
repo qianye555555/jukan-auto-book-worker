@@ -4,7 +4,7 @@ const test=require('node:test');
 const assert=require('node:assert/strict');
 const {
   coordToCell,cellToCoord,pvToCells,parseEval,positionCommand,SearchCapture,
-  githubOidcConfig
+  isImmediateWinningMove,attachImmediateProof,githubOidcConfig
 }=require('./worker.cjs');
 
 test('cell conversion round-trips on 15x15 board',()=>{
@@ -45,6 +45,20 @@ test('SearchCapture emits legal final candidate and checkpoints',()=>{
   assert.equal(result.candidates[0].cell,'G7');
   assert.equal(result.candidates[0].eval,0.42);
   assert.ok(result.checkpoints.length>=1);
+});
+
+test('immediate exact-five result is proven without waiting full budget',()=>{
+  const moves=['H8','A1','I8','A2','J8','A3','K8','A4'];
+  assert.equal(isImmediateWinningMove(moves,'G8','renju'),true);
+  assert.equal(isImmediateWinningMove(moves,'G7','renju'),false);
+  const result={
+    candidates:[{cell:'G8',rank:1,eval:null,mate:null}],
+    checkpoints:[{elapsed_ms:120,best_move:'G8',eval:null,mate:null}],
+    durationMs:120
+  };
+  attachImmediateProof(result,{moves,rule:'renju'});
+  assert.deepEqual(result.candidates[0].mate,{sign:1,plies:1});
+  assert.deepEqual(result.checkpoints[0].mate,{sign:1,plies:1});
 });
 
 test('OIDC config never accepts missing GitHub token environment',()=>{
