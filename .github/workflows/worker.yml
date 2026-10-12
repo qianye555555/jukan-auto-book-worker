@@ -1,0 +1,71 @@
+name: JUKAN Auto Book Worker
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 */2 * * *'
+  push:
+    branches:
+      - main
+    paths:
+      - 'worker.cjs'
+      - 'worker.test.cjs'
+      - 'build-engine.sh'
+      - '.github/workflows/worker.yml'
+      - '.worker-trigger'
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: jukan-auto-book-worker
+  cancel-in-progress: false
+
+jobs:
+  verify-one:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Checkout worker
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Worker unit tests
+        run: node --test worker.test.cjs
+
+      - name: Preflight queue
+        id: queue
+        run: node worker.cjs --peek
+
+      - name: Restore pinned Rapfi runtime
+        if: steps.queue.outputs.pending == 'true'
+        id: engine-cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/engine
+          key: rapfi-linux-avx2-1be1551ced57e38d53ed58f6d74bf6f8b4bdc230-net-918b757a129258e9e765f77fe17d507c2bb1a60b-v1
+
+      - name: Build pinned Rapfi runtime
+        if: steps.queue.outputs.pending == 'true' && steps.engine-cache.outputs.cache-hit != 'true'
+        run: bash build-engine.sh .cache
+
+      - name: Verify runtime files
+        if: steps.queue.outputs.pending == 'true'
+        run: |
+          test -x .cache/engine/rapfi
+          test -f .cache/engine/config.toml
+          test -f .cache/engine/mix9svqrenju_bs15_black.bin.lz4
+          test -f .cache/engine/mix9svqrenju_bs15_white.bin.lz4
+          .cache/engine/rapfi bench | tail -n 20
+
+      - name: Verify one queued position
+        if: steps.queue.outputs.pending == 'true'
+        env:
+          AUTO_BOOK_ENGINE_BIN: ${{ github.workspace }}/.cache/engine/rapfi
+          AUTO_BOOK_ENGINE_DIR: ${{ github.workspace }}/.cache/engine
+        run: node worker.cjs
