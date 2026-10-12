@@ -88,6 +88,60 @@ function candidateFromFrame(key,stats,rank){
   return {cell:coordToCell(point),rank,...snapshotStats(stats)};
 }
 
+function winningLineLengths(moves,cell){
+  if(!Array.isArray(moves))throw Error('INVALID_MOVES');
+  const target=String(cell||'').toUpperCase();
+  const [x,y]=cellToCoord(target);
+  const occupied=new Map();
+  for(let i=0;i<moves.length;i++){
+    const name=String(moves[i]||'').toUpperCase();
+    cellToCoord(name);
+    if(occupied.has(name))throw Error('DUPLICATE_MOVE');
+    occupied.set(name,i%2);
+  }
+  if(occupied.has(target))return [];
+  const side=moves.length%2;
+  occupied.set(target,side);
+  const at=(px,py)=>{
+    if(px<0||px>=15||py<0||py>=15)return null;
+    return occupied.get(coordToCell([px,py]));
+  };
+  return [[1,0],[0,1],[1,1],[1,-1]].map(([dx,dy])=>{
+    let count=1;
+    for(const sign of [-1,1]){
+      let px=x+dx*sign,py=y+dy*sign;
+      while(at(px,py)===side){count++;px+=dx*sign;py+=dy*sign;}
+    }
+    return count;
+  });
+}
+
+function isImmediateWinningMove(moves,cell,rule='renju'){
+  const lengths=winningLineLengths(moves,cell);
+  if(!lengths.length)return false;
+  const side=moves.length%2;
+  if(rule==='freestyle')return lengths.some(n=>n>=5);
+  if(rule==='standard')return lengths.some(n=>n===5);
+  if(rule==='renju'){
+    if(side===1)return lengths.some(n=>n>=5);
+    if(lengths.some(n=>n>5))return false;
+    return lengths.some(n=>n===5);
+  }
+  return false;
+}
+
+function attachImmediateProof(result,job){
+  const best=result?.candidates?.[0];
+  if(!best||best.mate?.sign)return result;
+  if(!isImmediateWinningMove(job.moves,best.cell,job.rule))return result;
+  best.mate={sign:1,plies:1};
+  const finalCheckpoint=result.checkpoints?.at(-1);
+  if(finalCheckpoint&&finalCheckpoint.best_move===best.cell&&!finalCheckpoint.mate){
+    finalCheckpoint.mate={sign:1,plies:1};
+  }
+  return result;
+}
+
 class SearchCapture{
   constructor(budgetMs){this.reset(budgetMs);}
   reset(budgetMs){
@@ -234,6 +288,7 @@ async function createNativeVerifier({engineBin=process.env.AUTO_BOOK_ENGINE_BIN|
 
       const capture=new SearchCapture(budgetMs);
       const done=new Promise((resolve,reject)=>{active={capture,resolve,reject};});
+      let timeoutId=null;
       try{
         send('YXHASHCLEAR');
         send(`INFO RULE ${ruleCode}`);
@@ -246,10 +301,15 @@ async function createNativeVerifier({engineBin=process.env.AUTO_BOOK_ENGINE_BIN|
         send('INFO TIME_LEFT 2147483647');
         send(positionCommand(job.moves));
         send('YXNBEST 5');
-        const timeout=new Promise((_,reject)=>setTimeout(()=>reject(Error('RAPFI_SEARCH_TIMEOUT')),budgetMs+90000));
+        const timeout=new Promise((_,reject)=>{
+          timeoutId=setTimeout(()=>reject(Error('RAPFI_SEARCH_TIMEOUT')),budgetMs+90000);
+        });
         await Promise.race([done,timeout]);
-        return {...capture.result(),engineVersion};
+        const result=capture.result();
+        attachImmediateProof(result,job);
+        return {...result,engineVersion};
       }finally{
+        if(timeoutId!==null)clearTimeout(timeoutId);
         active=null;
       }
     },
@@ -282,13 +342,21 @@ async function runGithubWorker({env=process.env,fetchImpl=globalThis.fetch,creat
       try{await gateway('fail',{jobId:job.id,errorCode:code});}catch(reportError){console.error('[auto-book] failure report failed',reportError?.message||reportError);}
       throw error;
     }
-    const done=await gateway('complete',{
-      jobId:job.id,
-      checkpoints:result.checkpoints,
-      candidates:result.candidates,
-      engineVersion:result.engineVersion,
-      durationMs:result.durationMs
-    });
+    let done;
+    try{
+      done=await gateway('complete',{
+        jobId:job.id,
+        checkpoints:result.checkpoints,
+        candidates:result.candidates,
+        engineVersion:result.engineVersion,
+        durationMs:result.durationMs
+      });
+    }catch(error){
+      const code=`COMPLETE:${String(error?.message||error)}`.slice(0,120);
+      console.error(`[auto-book] completion failed for ${job.id}: ${code}`);
+      try{await gateway('fail',{jobId:job.id,errorCode:code});}catch(reportError){console.error('[auto-book] completion failure report failed',reportError?.message||reportError);}
+      throw error;
+    }
     console.log(`[auto-book] job ${job.id} → ${done?.decision||'completed'} · ${result.durationMs}ms`);
     return {processed:true,jobId:job.id,decision:done?.decision||null};
   }finally{verifier.close();}
@@ -296,7 +364,8 @@ async function runGithubWorker({env=process.env,fetchImpl=globalThis.fetch,creat
 
 module.exports={
   AUDIENCE,DEFAULT_GATEWAY,githubOidcConfig,oidcToken,createGateway,
-  coordToCell,cellToCoord,pvToCells,parseEval,snapshotStats,positionCommand,SearchCapture,
+  coordToCell,cellToCoord,pvToCells,parseEval,snapshotStats,positionCommand,
+  winningLineLengths,isImmediateWinningMove,attachImmediateProof,SearchCapture,
   createNativeVerifier,peekGithubQueue,runGithubWorker
 };
 
