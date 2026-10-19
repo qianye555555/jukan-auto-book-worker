@@ -2,8 +2,6 @@ name: JUKAN Auto Book Worker
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '17 */2 * * *'
 
 permissions:
   contents: read
